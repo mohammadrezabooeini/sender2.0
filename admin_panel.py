@@ -132,6 +132,37 @@ def _can_post(member):
     return True
 
 
+def _not_member_text():
+    return (
+        "کانال ثبت نشد.\n"
+        "ربات داخل این کانال نیست. در خود کانال برو به Administrators، "
+        "ربات را Admin کن و Post Messages را روشن کن."
+    )
+
+
+async def _posting_status(bot, chat_id):
+    """Return yes, no, or unknown.
+
+    Telegram often answers getChatMember with "member list is inaccessible"
+    for channel admins. That is not proof the bot cannot post.
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, bot.id)
+    except BadRequest as exc:
+        if "member list is inaccessible" in str(exc).lower():
+            logger.warning(
+                "member list hidden for %s; saving the channel anyway",
+                chat_id,
+            )
+            return "unknown"
+        logger.warning("membership check failed for %s: %s", chat_id, exc)
+        return "no"
+    except Forbidden as exc:
+        logger.warning("membership check failed for %s: %s", chat_id, exc)
+        return "no"
+    return "yes" if _can_post(member) else "no"
+
+
 async def add_target_channel(bot, raw, last_sent):
     parsed = parse_target(raw)
     if parsed is None:
@@ -141,33 +172,37 @@ async def add_target_channel(bot, raw, last_sent):
 
     try:
         chat = await bot.get_chat(parsed)
-    except (BadRequest, Forbidden) as exc:
-        logger.info("get_chat failed for %s: %s", parsed, exc)
-        return False, "کانال پیدا نشد یا ربات به آن دسترسی ندارد."
+    except Forbidden as exc:
+        logger.warning("get_chat failed for %s: %s", parsed, exc)
+        return False, _not_member_text()
+    except BadRequest as exc:
+        logger.warning("get_chat failed for %s: %s", parsed, exc)
+        return False, "کانال پیدا نشد. آیدی را از خود کانال کپی کن."
 
     if chat.id == SOURCE_CHANNEL:
         return False, "کانال مبدأ را نمی‌توان مقصد کرد."
     if chat.type not in {ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP}:
         return False, "فقط کانال یا گروه را می‌توان مقصد کرد."
 
-    try:
-        member = await bot.get_chat_member(chat.id, bot.id)
-    except (BadRequest, Forbidden) as exc:
-        logger.info("membership check failed for %s: %s", chat.id, exc)
-        return False, "ربات در این کانال عضو نیست. اول ادمینش کن."
-
-    if not _can_post(member):
-        return False, "ربات باید ادمین باشد و اجازه ارسال پیام داشته باشد."
+    status = await _posting_status(bot, chat.id)
+    if status == "no":
+        return False, (
+            "کانال ثبت نشد.\n"
+            "ربات باید Admin باشد و مجوز Post Messages داشته باشد."
+        )
 
     if not add_channel(chat.id, last_sent):
         return False, "این کانال قبلاً ثبت شده."
 
     title = chat.title or str(chat.id)
-    return True, (
-        "✅ کانال اضافه شد\n"
-        f"{title}\n{chat.id}\n"
-        "از این به بعد فقط پیام‌های جدید فوروارد می‌شوند."
-    )
+    logger.info("destination added: %s (%s) access=%s", title, chat.id, status)
+    note = "از این به بعد فقط پیام‌های جدید فوروارد می‌شوند."
+    if status == "unknown":
+        note += (
+            "\nتلگرام سطح دسترسی را نشان نداد. "
+            "اگر پیام نرفت، Post Messages را برای ربات روشن کن."
+        )
+    return True, f"✅ کانال اضافه شد\n{title}\n{chat.id}\n{note}"
 
 
 async def remove_target_channel(bot, raw):

@@ -1,7 +1,7 @@
 import asyncio
 import re
 
-from telegram import BotCommand, Update
+from telegram import BotCommand
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
@@ -17,6 +17,7 @@ from admin_panel import (
 from config import ADMIN_ID, BOT_TOKEN, SOURCE_CHANNEL, is_admin
 from database import (
     get_channel_details,
+    get_channels,
     get_last_source_message_id,
     init_db,
     remember_source_message,
@@ -92,16 +93,31 @@ async def _notify_failure(bot, bot_data, channel_id, message_id, error):
 
 async def forward(update, context):
     msg = update.channel_post
-    if msg is None or msg.chat.id != SOURCE_CHANNEL:
+    if msg is None:
+        return
+    if msg.chat.id != SOURCE_CHANNEL:
+        logger.info(
+            "ignored channel post %s from %s; source is %s",
+            msg.message_id,
+            msg.chat.id,
+            SOURCE_CHANNEL,
+        )
         return
 
+    logger.info("source post %s received", msg.message_id)
     remember_source_message(msg.message_id)
+    details = get_channel_details()
+    if not details:
+        logger.warning("source post %s not forwarded: no destination channels", msg.message_id)
+        return
+
     pending = [
         channel_id
-        for channel_id, last_sent in get_channel_details()
+        for channel_id, last_sent in details
         if msg.message_id > last_sent
     ]
     if not pending:
+        logger.info("source post %s already delivered", msg.message_id)
         return
 
     stats = context.bot_data.setdefault("stats", {"ok": 0, "fail": 0})
@@ -197,6 +213,16 @@ async def channels(update, context):
 async def post_init(application):
     me = await application.bot.get_me()
     application.bot_data["bot_id"] = me.id
+    logger.info("destinations: %s", get_channels() or "none")
+    try:
+        source = await application.bot.get_chat(SOURCE_CHANNEL)
+        logger.info("source channel visible: %s (%s)", source.title, source.id)
+    except TelegramError as exc:
+        logger.error(
+            "bot cannot see source channel %s: %s. Make it an admin with post permission.",
+            SOURCE_CHANNEL,
+            exc,
+        )
     try:
         await application.bot.set_my_commands(
             [
@@ -253,7 +279,9 @@ def main():
     app.add_error_handler(on_error)
 
     logger.info("polling started")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        allowed_updates=["message", "channel_post", "callback_query"]
+    )
 
 
 if __name__ == "__main__":
